@@ -14,7 +14,7 @@ MAX_POSTS = 1
 MAX_PER_FEED = 10
 KEEP_HISTORY = 1000
 USE_AI_TITLE = True
-USE_AI_IMAGE = True
+USE_AI_IMAGE = False
 TEXT_MODEL = "gemini-2.5-flash"
 IMAGE_MODEL = "gemini-2.5-flash-image"   # change here if Google renames it
 # ------------------------------
