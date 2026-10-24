@@ -1,18 +1,18 @@
-import os, json, itertools, feedparser, requests
+import os, json, itertools, re, feedparser, requests
 from bs4 import BeautifulSoup
-from googlenewsdecoder import gnewsdecoder
 
 # ---------- SETTINGS ----------
 FEEDS = [
-    ("USA",    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
-    ("Europe", "https://news.google.com/rss/search?q=europe&hl=en-GB&gl=GB&ceid=GB:en"),
-    ("USA",    "https://news.google.com/rss/search?q=united+states+breaking+news&hl=en-US&gl=US&ceid=US:en"),
-    ("Europe", "https://news.google.com/rss?hl=en-GB&gl=GB&ceid=GB:en"),
-    ("Europe", "https://news.google.com/rss?hl=en-IE&gl=IE&ceid=IE:en"),
+    ("USA",    "https://feeds.npr.org/1001/rss.xml"),
+    ("Europe", "https://feeds.bbci.co.uk/news/world/europe/rss.xml"),
+    ("USA",    "https://rss.nytimes.com/services/xml/rss/nyt/US.xml"),
+    ("Europe", "https://www.theguardian.com/world/europe-news/rss"),
+    ("USA",    "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml"),
+    ("Europe", "https://www.euronews.com/rss?level=theme&name=news"),
 ]
-MAX_POSTS = 1          # posts per run
-MAX_PER_FEED = 10      # articles checked per feed
-KEEP_HISTORY = 1000    # remembered posted links
+MAX_POSTS = 1
+MAX_PER_FEED = 10
+KEEP_HISTORY = 1000
 # ------------------------------
 
 PAGE_ID = os.environ["FB_PAGE_ID"]
@@ -24,7 +24,20 @@ history = json.load(open(DB)) if os.path.exists(DB) else []
 posted = set(history)
 
 
-def get_image(url):
+def image_from_entry(e):
+    for key in ("media_content", "media_thumbnail"):
+        for m in e.get(key, []) or []:
+            if m.get("url", "").startswith("http"):
+                return m["url"]
+    for enc in e.get("enclosures", []) or []:
+        if enc.get("type", "").startswith("image") and enc.get("href"):
+            return enc["href"]
+    html = e.get("summary", "") or ""
+    m = re.search(r'<img[^>]+src="([^"]+)"', html)
+    return m.group(1) if m else None
+
+
+def image_from_page(url):
     try:
         html = requests.get(url, timeout=15, headers=HEADERS).text
         soup = BeautifulSoup(html, "html.parser")
@@ -37,12 +50,11 @@ def get_image(url):
     return None
 
 
-# Load all feeds and mix them so USA and Europe alternate
 lists = []
 for region, url in FEEDS:
     try:
-        entries = feedparser.parse(url).entries[:MAX_PER_FEED]
-        print(f"{region}: {len(entries)} entries")
+        entries = feedparser.parse(url, request_headers=HEADERS).entries[:MAX_PER_FEED]
+        print(f"{region}: {len(entries)} entries - {url}")
         lists.append([(region, e) for e in entries])
     except Exception as e:
         print("feed error:", e)
@@ -50,28 +62,17 @@ for region, url in FEEDS:
 mixed = [x for group in itertools.zip_longest(*lists) for x in group if x]
 
 count = 0
-seen_titles = set()
 for region, entry in mixed:
     if count >= MAX_POSTS:
         break
-    if entry.link in posted or entry.title in seen_titles:
+    link = entry.get("link", "")
+    title = entry.get("title", "").strip()
+    if not link or not title or link in posted:
         continue
-    seen_titles.add(entry.title)
-    print(f"Trying [{region}]:", entry.title)
+    print(f"Trying [{region}]:", title)
 
-    try:
-        real = gnewsdecoder(entry.link)
-        real_url = real.get("decoded_url") if real.get("status") else None
-    except Exception as e:
-        print("decode error:", e)
-        real_url = None
-
-    if not real_url:
-        print("Could not decode link, skipping")
-        continue
-
-    image = get_image(real_url)
-    caption = f"{entry.title}\n\nRead more: {real_url}"
+    image = image_from_entry(entry) or image_from_page(link)
+    caption = f"{title}\n\nRead more: {link}"
 
     if image:
         r = requests.post(
@@ -80,22 +81,21 @@ for region, entry in mixed:
         )
         if not r.ok:
             print("Photo post failed:", r.status_code, r.text)
-            print("Trying link post instead")
             r = requests.post(
                 f"https://graph.facebook.com/v21.0/{PAGE_ID}/feed",
-                data={"message": entry.title, "link": real_url, "access_token": TOKEN},
+                data={"message": title, "link": link, "access_token": TOKEN},
             )
     else:
         print("No image, posting link instead")
         r = requests.post(
             f"https://graph.facebook.com/v21.0/{PAGE_ID}/feed",
-            data={"message": entry.title, "link": real_url, "access_token": TOKEN},
+            data={"message": title, "link": link, "access_token": TOKEN},
         )
 
     print(r.status_code, r.text)
     if r.ok:
-        history.append(entry.link)
-        posted.add(entry.link)
+        history.append(link)
+        posted.add(link)
         count += 1
 
 json.dump(history[-KEEP_HISTORY:], open(DB, "w"))
